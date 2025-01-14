@@ -187,10 +187,10 @@ class ModelValidator:
         return "\n".join(report)
     
     class ValidationSuite:
-    """
-    Comprehensive validation suite for tumor growth model.
-    Includes unit tests, integration tests, and parameter validation.
-    """
+        """
+        Comprehensive validation suite for tumor growth model.
+        Includes unit tests, integration tests, and parameter validation.
+        """
     
     def __init__(self, model):
         self.model = model
