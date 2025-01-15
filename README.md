@@ -1,8 +1,4 @@
-Below is a revised **README** template reflecting your requests: it now references the **Apache License 2.0**, includes your **personal details**, and **removes** any reference to the VSCode project export extension. Feel free to adapt and refine it as necessary.
-
----
-
-# Tumor Growth RBF Simulator
+# Tumor Growth Simulator
 
 A **high-performance, meshless tumor growth simulation framework** leveraging **Radial Basis Function-generated Finite Differences (RBF-FD)**. This repository integrates complex biological modeling (immune response, multi-phase cell cycle, treatment interventions) with advanced numerical methods (adaptive mesh refinement, PDE solvers) to study tumor growth in 2D.
 
