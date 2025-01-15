@@ -6,12 +6,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="tumor-growth-rbf",
     version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Robert Fuge",
+    author_email="rephug@gmail.com",
     description="Meshless tumor growth simulator using RBF-FD",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/tumor-growth-rbf",
+    url="https://github.com/rephug/tumor-growth-rbf",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[

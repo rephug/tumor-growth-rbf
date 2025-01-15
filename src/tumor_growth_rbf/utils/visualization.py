@@ -1,228 +1,343 @@
-#!/usr/bin/env python3
 """
 visualization.py
 
-Visualization utilities for tumor growth simulations.
+Comprehensive visualization tools for tumor growth model analysis.
+Handles multi-modal visualization of tumor growth, tissue properties,
+cell populations, and treatment responses. Designed to work with
+medical imaging data and produce publication-quality figures.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from typing import List, Optional, Tuple
+from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
+from typing import Dict, List, Optional, Tuple, Union
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 class TumorVisualizer:
     """
-    Handles visualization of tumor simulation results.
+    Advanced visualization tools for tumor growth analysis.
+    
+    Features:
+    - Multi-modal visualization of tumor state
+    - Cell population distribution plots
+    - Tissue-specific analysis
+    - Treatment response visualization
+    - Animation capabilities
+    - Medical image overlay support
     """
     
-    def __init__(self, figsize: Tuple[int, int] = (10, 8)):
-        self.figsize = figsize
-        
-    def plot_density(self,
-                    tumor_density: np.ndarray,
-                    title: str = "Tumor Density",
-                    show_colorbar: bool = True) -> plt.Figure:
+    def __init__(self, 
+                 model,
+                 figsize: Tuple[int, int] = (10, 8),
+                 cmap_tumor: str = 'hot',
+                 cmap_oxygen: str = 'RdYlBu_r',
+                 output_dir: Optional[str] = None):
         """
-        Plot tumor density distribution.
+        Initialize visualizer with model and display preferences.
         
         Args:
-            tumor_density: 2D array of tumor density values
-            title: Plot title
-            show_colorbar: Whether to show colorbar
+            model: TumorModel instance
+            figsize: Default figure size
+            cmap_tumor: Colormap for tumor density
+            cmap_oxygen: Colormap for oxygen distribution
+            output_dir: Directory for saving figures
+        """
+        self.model = model
+        self.figsize = figsize
+        self.cmap_tumor = cmap_tumor
+        self.cmap_oxygen = cmap_oxygen
+        self.output_dir = Path(output_dir) if output_dir else None
+        
+        # Create custom colormaps for different visualizations
+        self.tissue_colors = {
+            'white_matter': '#E6E6E6',
+            'gray_matter': '#808080',
+            'csf': '#87CEEB',
+            'vessel': '#FF0000',
+            'necrotic': '#4A0000'
+        }
+        
+        # Cell population colors
+        self.population_colors = {
+            'G1': '#2ecc71',  # Green for growth
+            'S': '#e74c3c',   # Red for synthesis
+            'G2': '#3498db',  # Blue for gap 2
+            'M': '#f1c40f',   # Yellow for mitosis
+            'Q': '#95a5a6',   # Gray for quiescent
+            'N': '#2c3e50'    # Dark blue for necrotic
+        }
+        
+    def create_state_visualization(self,
+                                 time: float,
+                                 show_oxygen: bool = True,
+                                 show_vessels: bool = True,
+                                 show_tissue: bool = True) -> plt.Figure:
+        """
+        Create comprehensive visualization of current tumor state.
+        
+        Args:
+            time: Current simulation time
+            show_oxygen: Whether to show oxygen distribution
+            show_vessels: Whether to show vessel positions
+            show_tissue: Whether to show tissue types
             
         Returns:
-            matplotlib Figure object
+            matplotlib Figure with multiple subplots
         """
-        fig, ax = plt.subplots(figsize=self.figsize)
-        im = ax.imshow(tumor_density, cmap='hot', interpolation='nearest')
-        
-        if show_colorbar:
-            plt.colorbar(im, ax=ax, label='Density')
+        n_plots = 1 + show_oxygen + show_vessels + show_tissue
+        fig, axes = plt.subplots(1, n_plots, figsize=(5*n_plots, 5))
+        if n_plots == 1:
+            axes = [axes]
             
-        ax.set_title(title)
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
+        plot_idx = 0
         
+        # Plot tumor density
+        self._plot_tumor_density(axes[plot_idx])
+        axes[plot_idx].set_title(f'Tumor Density (t={time:.1f} days)')
+        plot_idx += 1
+        
+        # Plot oxygen if requested
+        if show_oxygen:
+            self._plot_oxygen_distribution(axes[plot_idx])
+            axes[plot_idx].set_title('Oxygen Distribution')
+            plot_idx += 1
+            
+        # Plot vessels if requested
+        if show_vessels:
+            self._plot_vessel_map(axes[plot_idx])
+            axes[plot_idx].set_title('Vessel Distribution')
+            plot_idx += 1
+            
+        # Plot tissue types if requested
+        if show_tissue and hasattr(self.model, 'tissue_model'):
+            self._plot_tissue_types(axes[plot_idx])
+            axes[plot_idx].set_title('Tissue Types')
+            
+        plt.tight_layout()
         return fig
         
-    def plot_treatment_response(self,
-                              time_points: np.ndarray,
-                              metrics: List[dict],
-                              treatments: Optional[List[dict]] = None) -> plt.Figure:
+    def plot_cell_populations(self) -> plt.Figure:
+        """Create visualization of cell population distributions."""
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=self.figsize)
+        
+        # Plot spatial distribution of each population
+        phases = ['G1', 'S', 'G2', 'M']
+        axes = [ax1, ax2, ax3, ax4]
+        
+        for phase, ax in zip(phases, axes):
+            pop = self.model.cell_populations.populations[phase]
+            im = ax.imshow(pop, cmap=plt.get_cmap('viridis'),
+                          extent=[0, self.model.domain_size[0],
+                                0, self.model.domain_size[1]])
+            plt.colorbar(im, ax=ax)
+            ax.set_title(f'{phase} Phase')
+            
+        plt.tight_layout()
+        return fig
+        
+    def create_treatment_response_plot(self,
+                                     times: np.ndarray,
+                                     metrics: List[Dict],
+                                     treatments: Optional[List[Dict]] = None) -> plt.Figure:
         """
-        Plot tumor response to treatment.
+        Visualize tumor response to treatment.
         
         Args:
-            time_points: Array of time points
-            metrics: List of metric dictionaries for each time point
+            times: Array of time points
+            metrics: List of metric dictionaries
             treatments: Optional list of treatment events
-            
-        Returns:
-            matplotlib Figure object
         """
-        fig, ax = plt.subplots(figsize=self.figsize)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12),
+                                      height_ratios=[2, 1])
         
         # Plot total mass over time
-        masses = [m['total_mass'] for m in metrics]
-        ax.plot(time_points, masses, 'b-', label='Tumor Mass')
+        masses = [m['tumor']['total_mass'] for m in metrics]
+        ax1.plot(times, masses, 'b-', label='Total Mass')
         
+        # Plot population fractions
+        for phase, color in self.population_colors.items():
+            if phase in metrics[0]['cell_populations']:
+                fractions = [m['cell_populations'][f'{phase.lower()}_fraction']
+                           for m in metrics]
+                ax2.plot(times, fractions, color=color, label=f'{phase} Phase')
+                
         # Add treatment markers if provided
         if treatments:
             for treatment in treatments:
-                ax.axvline(x=treatment['time'], color='r', linestyle='--', alpha=0.3)
-                ax.text(treatment['time'], ax.get_ylim()[1],
-                       f"{treatment['type']}\n{treatment['intensity']:.1f}",
-                       rotation=90, ha='right')
+                t = treatment['time']
+                ax1.axvline(x=t, color='r', linestyle='--', alpha=0.3)
+                ax2.axvline(x=t, color='r', linestyle='--', alpha=0.3)
                 
-        ax.set_xlabel('Time (days)')
-        ax.set_ylabel('Total Tumor Mass')
-        ax.set_title('Treatment Response')
-        ax.grid(True)
+        ax1.set_ylabel('Total Tumor Mass')
+        ax2.set_xlabel('Time (days)')
+        ax2.set_ylabel('Population Fractions')
         
-        if treatments:
-            ax.legend(['Tumor Mass', 'Treatment'])
-            
+        ax1.legend()
+        ax2.legend()
+        ax1.grid(True)
+        ax2.grid(True)
+        
         return fig
         
     def create_animation(self,
-                        tumor_states: List[np.ndarray],
-                        time_points: np.ndarray,
+                        times: np.ndarray,
+                        states: List[Dict],
                         interval: int = 200) -> FuncAnimation:
         """
         Create animation of tumor evolution.
         
         Args:
-            tumor_states: List of tumor density arrays
-            time_points: Array of time points
+            times: Array of time points
+            states: List of model states
             interval: Animation interval in milliseconds
-            
-        Returns:
-            matplotlib Animation object
         """
         fig, ax = plt.subplots(figsize=self.figsize)
         
-        vmin = min(state.min() for state in tumor_states)
-        vmax = max(state.max() for state in tumor_states)
+        vmin = min(np.min(state['tumor_density']) for state in states)
+        vmax = max(np.max(state['tumor_density']) for state in states)
         
-        im = ax.imshow(tumor_states[0], cmap='hot',
-                      interpolation='nearest',
+        im = ax.imshow(states[0]['tumor_density'], 
+                      cmap=self.cmap_tumor,
                       vmin=vmin, vmax=vmax)
-        plt.colorbar(im, ax=ax, label='Density')
+        plt.colorbar(im)
         
         def update(frame):
-            im.set_array(tumor_states[frame])
-            ax.set_title(f'Time: {time_points[frame]:.1f} days')
+            im.set_array(states[frame]['tumor_density'])
+            ax.set_title(f'Time: {times[frame]:.1f} days')
             return [im]
             
         anim = FuncAnimation(fig, update,
-                           frames=len(tumor_states),
+                           frames=len(states),
                            interval=interval,
                            blit=True)
                            
         return anim
         
-    def plot_spatial_analysis(self,
-                            tumor_density: np.ndarray,
-                            oxygen: Optional[np.ndarray] = None) -> plt.Figure:
+    def _plot_tumor_density(self, ax: plt.Axes):
+        """Plot tumor density distribution."""
+        im = ax.imshow(self.model.tumor_density,
+                      extent=[0, self.model.domain_size[0],
+                             0, self.model.domain_size[1]],
+                      cmap=self.cmap_tumor)
+        plt.colorbar(im, ax=ax)
+        ax.set_xlabel('Position (mm)')
+        ax.set_ylabel('Position (mm)')
+        
+    def _plot_oxygen_distribution(self, ax: plt.Axes):
+        """Plot oxygen concentration."""
+        im = ax.imshow(self.model.oxygen,
+                      extent=[0, self.model.domain_size[0],
+                             0, self.model.domain_size[1]],
+                      cmap=self.cmap_oxygen)
+        plt.colorbar(im, ax=ax)
+        ax.set_xlabel('Position (mm)')
+        
+    def _plot_vessel_map(self, ax: plt.Axes):
+        """Plot vessel distribution."""
+        im = ax.imshow(self.model.vessels,
+                      extent=[0, self.model.domain_size[0],
+                             0, self.model.domain_size[1]],
+                      cmap='Reds')
+        plt.colorbar(im, ax=ax)
+        ax.set_xlabel('Position (mm)')
+        
+    def _plot_tissue_types(self, ax: plt.Axes):
+        """Plot tissue type distribution."""
+        if not hasattr(self.model, 'tissue_model') or \
+           self.model.tissue_model.tissue_map is None:
+            return
+            
+        tissue_values = np.zeros_like(
+            self.model.tissue_model.tissue_map, dtype=float
+        )
+        
+        for tissue_type, color in self.tissue_colors.items():
+            mask = self.model.tissue_model.tissue_map == tissue_type
+            tissue_values[mask] = list(self.tissue_colors.keys()).index(tissue_type)
+            
+        im = ax.imshow(tissue_values,
+                      extent=[0, self.model.domain_size[0],
+                             0, self.model.domain_size[1]],
+                      cmap=plt.ListedColormap(list(self.tissue_colors.values())))
+                      
+        # Create custom legend
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor=color, label=tissue)
+                         for tissue, color in self.tissue_colors.items()]
+        ax.legend(handles=legend_elements, loc='center left',
+                 bbox_to_anchor=(1, 0.5))
+        ax.set_xlabel('Position (mm)')
+        
+    def save_figure(self,
+                   fig: plt.Figure,
+                   filename: str,
+                   dpi: int = 300):
+        """Save figure to file."""
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            filepath = self.output_dir / filename
+            fig.savefig(filepath, dpi=dpi, bbox_inches='tight')
+            logger.info(f"Saved figure to {filepath}")
+            
+    def plot_metrics_history(self,
+                           times: np.ndarray,
+                           metrics: List[Dict]) -> plt.Figure:
         """
-        Create detailed spatial analysis plots.
+        Plot evolution of key metrics over time.
         
         Args:
-            tumor_density: 2D array of tumor density
-            oxygen: Optional 2D array of oxygen concentration
-            
-        Returns:
-            matplotlib Figure object
+            times: Array of time points
+            metrics: List of metric dictionaries
         """
-        if oxygen is not None:
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
-        else:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-            
-        # Tumor density
-        im1 = ax1.imshow(tumor_density, cmap='hot')
-        plt.colorbar(im1, ax=ax1, label='Density')
-        ax1.set_title('Tumor Density')
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         
-        # Radial profile
-        radial_profile = self._compute_radial_profile(tumor_density)
-        ax2.plot(radial_profile)
-        ax2.set_xlabel('Radius (pixels)')
-        ax2.set_ylabel('Average Density')
-        ax2.set_title('Radial Density Profile')
+        # Plot tumor mass
+        ax = axes[0, 0]
+        masses = [m['tumor']['total_mass'] for m in metrics]
+        ax.plot(times, masses)
+        ax.set_ylabel('Total Tumor Mass')
+        ax.set_xlabel('Time (days)')
+        ax.grid(True)
         
-        # Oxygen overlay if provided
-        if oxygen is not None:
-            im3 = ax3.imshow(oxygen, cmap='Blues')
-            plt.colorbar(im3, ax=ax3, label='Oxygen')
-            ax3.contour(tumor_density, colors='r', alpha=0.5)
-            ax3.set_title('Oxygen with Tumor Contours')
-            
+        # Plot hypoxic fraction
+        ax = axes[0, 1]
+        hypoxic = [m['tumor']['hypoxic_fraction'] for m in metrics]
+        ax.plot(times, hypoxic)
+        ax.set_ylabel('Hypoxic Fraction')
+        ax.set_xlabel('Time (days)')
+        ax.grid(True)
+        
+        # Plot population distribution
+        ax = axes[1, 0]
+        for phase, color in self.population_colors.items():
+            if phase in metrics[0]['cell_populations']:
+                fractions = [m['cell_populations'][f'{phase.lower()}_fraction']
+                           for m in metrics]
+                ax.plot(times, fractions, color=color, label=phase)
+        ax.set_ylabel('Population Fractions')
+        ax.set_xlabel('Time (days)')
+        ax.legend()
+        ax.grid(True)
+        
+        # Plot treatment metrics if available
+        ax = axes[1, 1]
+        if 'treatment' in metrics[0]:
+            treatment_metrics = [m['treatment'] for m in metrics]
+            if 'cumulative_radiation' in treatment_metrics[0]:
+                cumulative = [m['cumulative_radiation'] for m in treatment_metrics]
+                ax.plot(times, cumulative, label='Cumulative Radiation')
+            if 'mean_drug_concentration' in treatment_metrics[0]:
+                drug_conc = [m['mean_drug_concentration'] for m in treatment_metrics]
+                ax.plot(times, drug_conc, label='Drug Concentration')
+        ax.set_ylabel('Treatment Metrics')
+        ax.set_xlabel('Time (days)')
+        ax.legend()
+        ax.grid(True)
+        
         plt.tight_layout()
         return fig
-        
-    @staticmethod
-    def _compute_radial_profile(data: np.ndarray) -> np.ndarray:
-        """Compute radial profile of 2D data."""
-        y, x = np.indices(data.shape)
-        center = np.array([(x.max()-x.min())/2.0, (y.max()-y.min())/2.0])
-        r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-        r = r.astype(int)
-        
-        tbin = np.bincount(r.ravel(), data.ravel())
-        nr = np.bincount(r.ravel())
-        radialprofile = tbin / nr
-        return radialprofile
-
-def create_multi_panel_figure(model,
-                            time_points: List[float],
-                            figsize: Tuple[int, int] = (15, 10)) -> plt.Figure:
-    """
-    Create comprehensive multi-panel figure of simulation results.
-    
-    Args:
-        model: TumorModel instance
-        time_points: List of time points to show
-        figsize: Figure size
-        
-    Returns:
-        matplotlib Figure object
-    """
-    fig = plt.figure(figsize=figsize)
-    gs = plt.GridSpec(2, 3, figure=fig)
-    
-    # Tumor evolution
-    ax1 = fig.add_subplot(gs[0, :2])
-    masses = [model.get_metrics()['total_mass'] for _ in time_points]
-    ax1.plot(time_points, masses)
-    ax1.set_xlabel('Time (days)')
-    ax1.set_ylabel('Total Tumor Mass')
-    ax1.set_title('Tumor Growth')
-    
-    # Final density distribution
-    ax2 = fig.add_subplot(gs[0, 2])
-    im2 = ax2.imshow(model.tumor_density, cmap='hot')
-    plt.colorbar(im2, ax=ax2)
-    ax2.set_title('Final Density Distribution')
-    
-    # Oxygen distribution
-    ax3 = fig.add_subplot(gs[1, 0])
-    im3 = ax3.imshow(model.oxygen, cmap='Blues')
-    plt.colorbar(im3, ax=ax3)
-    ax3.set_title('Oxygen Distribution')
-    
-    # Metrics over time
-    ax4 = fig.add_subplot(gs[1, 1:])
-    metrics = [model.get_metrics() for _ in time_points]
-    for key in ['max_density', 'hypoxic_fraction']:
-        values = [m[key] for m in metrics]
-        ax4.plot(time_points, values, label=key)
-    ax4.legend()
-    ax4.set_xlabel('Time (days)')
-    ax4.set_title('Evolution of Metrics')
-    
-    plt.tight_layout()
-    return fig

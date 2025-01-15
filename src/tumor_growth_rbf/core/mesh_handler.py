@@ -1,247 +1,340 @@
 #!/usr/bin/env python3
 """
-mesh_handler.py
-
-Handles point distribution and refinement for meshless RBF-FD method.
+Enhanced mesh handler with feature-based adaptivity and error estimation.
+Builds on existing MeshHandler class to provide more sophisticated
+mesh refinement for tumor simulations.
 """
 
 import numpy as np
 from scipy.spatial import cKDTree
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 import logging
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class MeshHandler:
+@dataclass
+class AdaptivityParameters:
+    """Parameters controlling mesh adaptation."""
+    # Feature detection thresholds
+    gradient_threshold: float = 0.1    # For tumor boundary detection
+    curvature_threshold: float = 0.2   # For sharp features
+    oxygen_threshold: float = 0.15     # For hypoxic regions
+    
+    # Refinement control
+    max_refinement_level: int = 5      # Maximum number of refinement levels
+    coarsening_threshold: float = 0.01 # When to merge points
+    min_point_spacing: float = 0.01    # Minimum allowed distance between points
+    
+    # Error estimation
+    error_tolerance: float = 1e-3      # Maximum allowed error estimate
+    
+    def validate(self):
+        """Validate parameter values."""
+        for name, value in self.__dict__.items():
+            if value < 0:
+                raise ValueError(f"Parameter {name} must be non-negative")
+
+class EnhancedMeshHandler:
     """
-    Handles point distribution and adaptive refinement for RBF-FD method.
+    Enhanced mesh handling with feature detection and error estimation.
+    Provides sophisticated point distribution for tumor simulations.
     """
     
     def __init__(self,
                  domain_size: Tuple[float, float],
-                 min_spacing: float = 0.01,
-                 max_spacing: float = 0.1):
+                 params: Optional[AdaptivityParameters] = None):
         """
-        Initialize mesh handler.
+        Initialize enhanced mesh handler.
         
         Args:
             domain_size: Physical domain size (Lx, Ly)
-            min_spacing: Minimum allowed point spacing
-            max_spacing: Maximum allowed point spacing
+            params: Adaptivity control parameters
         """
         self.domain_size = domain_size
-        self.min_spacing = min_spacing
-        self.max_spacing = max_spacing
+        self.params = params or AdaptivityParameters()
+        self.params.validate()
         
+        # Core mesh data
         self.points = None
         self.neighbor_lists = None
         self.kdtree = None
         
-    def initialize_points(self,
-                        n_points: int,
-                        distribution: str = "uniform") -> np.ndarray:
+        # Refinement tracking
+        self.refinement_levels = None
+        self.feature_indicators = None
+        
+    def detect_features(self,
+                       tumor_density: np.ndarray,
+                       oxygen_concentration: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Initialize point distribution.
+        Detect important features requiring mesh refinement.
         
         Args:
-            n_points: Number of points to generate
-            distribution: Type of distribution ("uniform", "random", or "halton")
+            tumor_density: Current tumor density field
+            oxygen_concentration: Optional oxygen concentration field
             
         Returns:
-            Array of point coordinates
+            Feature indicator field (0-1 scale, higher means more refinement needed)
         """
-        if distribution == "uniform":
-            points = self._create_uniform_points(n_points)
-        elif distribution == "random":
-            points = self._create_random_points(n_points)
-        elif distribution == "halton":
-            points = self._create_halton_points(n_points)
-        else:
-            raise ValueError(f"Unknown distribution type: {distribution}")
+        if self.points is None:
+            raise ValueError("Points not initialized")
             
-        self.points = points
-        self._update_neighbor_lists()
+        # 1. Compute tumor boundary regions (high gradients)
+        gradients = self._compute_field_gradients(tumor_density)
+        gradient_indicator = np.clip(
+            gradients / self.params.gradient_threshold, 0, 1
+        )
         
+        # 2. Detect regions of high curvature
+        curvature = self._compute_field_curvature(tumor_density)
+        curvature_indicator = np.clip(
+            curvature / self.params.curvature_threshold, 0, 1
+        )
+        
+        # 3. Include hypoxic regions if oxygen data available
+        oxygen_indicator = np.zeros_like(tumor_density)
+        if oxygen_concentration is not None:
+            oxygen_indicator = np.clip(
+                (self.params.oxygen_threshold - oxygen_concentration) /
+                self.params.oxygen_threshold,
+                0, 1
+            )
+        
+        # Combine indicators (can adjust weights based on importance)
+        feature_indicator = np.maximum.reduce([
+            gradient_indicator,
+            0.7 * curvature_indicator,  # Slightly lower weight
+            0.5 * oxygen_indicator      # Lower priority
+        ])
+        
+        self.feature_indicators = feature_indicator
+        return feature_indicator
+        
+    def refine_mesh(self,
+                   feature_indicator: np.ndarray,
+                   tumor_density: np.ndarray,
+                   error_estimates: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Refine mesh based on features and error estimates.
+        
+        Args:
+            feature_indicator: Indicator field showing where refinement is needed
+            tumor_density: Current tumor density field
+            error_estimates: Optional point-wise error estimates
+            
+        Returns:
+            Updated point coordinates
+        """
+        if self.points is None:
+            raise ValueError("Points not initialized")
+            
+        # Initialize refinement levels if needed
+        if self.refinement_levels is None:
+            self.refinement_levels = np.zeros(len(self.points))
+            
+        # 1. Identify regions needing refinement
+        refine_mask = feature_indicator > self.params.error_tolerance
+        
+        # Don't refine if already at max level
+        refine_mask &= (self.refinement_levels < self.params.max_refinement_level)
+        
+        # 2. Generate new points
+        new_points = []
+        new_levels = []
+        
+        for i in range(len(self.points)):
+            if refine_mask[i]:
+                # Generate points based on local feature orientation
+                local_points = self._generate_oriented_points(
+                    self.points[i],
+                    tumor_density,
+                    feature_indicator[i]
+                )
+                
+                new_points.extend(local_points)
+                new_levels.extend([
+                    self.refinement_levels[i] + 1
+                ] * len(local_points))
+                
+        # 3. Filter points to maintain minimum spacing
+        if new_points:
+            filtered_points = []
+            filtered_levels = []
+            
+            for p, level in zip(new_points, new_levels):
+                if self._check_point_spacing(p, filtered_points):
+                    filtered_points.append(p)
+                    filtered_levels.append(level)
+                    
+            if filtered_points:
+                self.points = np.vstack((
+                    self.points,
+                    np.array(filtered_points)
+                ))
+                self.refinement_levels = np.concatenate((
+                    self.refinement_levels,
+                    np.array(filtered_levels)
+                ))
+                
+        # 4. Update neighbor lists
+        self._update_neighbor_lists()
         return self.points
         
-    def _create_uniform_points(self, n_points: int) -> np.ndarray:
-        """Create uniform grid points."""
-        nx = ny = int(np.sqrt(n_points))
-        x = np.linspace(0, self.domain_size[0], nx)
-        y = np.linspace(0, self.domain_size[1], ny)
-        X, Y = np.meshgrid(x, y)
-        return np.column_stack((X.ravel(), Y.ravel()))
+    def _generate_oriented_points(self,
+                                center: np.ndarray,
+                                field: np.ndarray,
+                                feature_strength: float) -> List[np.ndarray]:
+        """
+        Generate new points oriented along feature directions.
         
-    def _create_random_points(self, n_points: int) -> np.ndarray:
-        """Create random points with minimum spacing."""
-        points = []
-        while len(points) < n_points:
-            point = np.random.rand(2) * self.domain_size
+        Args:
+            center: Center point coordinates
+            field: Field used to determine orientation
+            feature_strength: Local feature indicator value
             
-            if not points or self._check_spacing(point, points):
+        Returns:
+            List of new point coordinates
+        """
+        # Compute local gradient to determine feature orientation
+        grad = self._compute_local_gradient(center, field)
+        
+        if np.all(grad == 0):
+            # If no clear orientation, use radial distribution
+            return self._generate_radial_points(center, feature_strength)
+            
+        # Normalize gradient
+        grad_norm = np.linalg.norm(grad)
+        if grad_norm > 0:
+            grad = grad / grad_norm
+            
+        # Generate points along and perpendicular to gradient
+        theta = np.arctan2(grad[1], grad[0])
+        spacing = self.params.min_point_spacing * (
+            1 + (1 - feature_strength)
+        )
+        
+        points = []
+        
+        # Along gradient direction
+        points.append(center + spacing * grad)
+        points.append(center - spacing * grad)
+        
+        # Perpendicular direction
+        perp = np.array([-grad[1], grad[0]])
+        points.append(center + spacing * perp)
+        points.append(center - spacing * perp)
+        
+        # Filter points within domain
+        valid_points = []
+        for p in points:
+            if (0 <= p[0] <= self.domain_size[0] and
+                0 <= p[1] <= self.domain_size[1]):
+                valid_points.append(p)
+                
+        return valid_points
+        
+    def _generate_radial_points(self,
+                              center: np.ndarray,
+                              feature_strength: float) -> List[np.ndarray]:
+        """Generate points in a radial pattern."""
+        spacing = self.params.min_point_spacing * (
+            1 + (1 - feature_strength)
+        )
+        angles = np.linspace(0, 2*np.pi, 6, endpoint=False)
+        
+        points = []
+        for theta in angles:
+            offset = spacing * np.array([np.cos(theta), np.sin(theta)])
+            point = center + offset
+            
+            if (0 <= point[0] <= self.domain_size[0] and
+                0 <= point[1] <= self.domain_size[1]):
                 points.append(point)
                 
-        return np.array(points)
-        
-    def _create_halton_points(self, n_points: int) -> np.ndarray:
-        """Create points using Halton sequence for better uniformity."""
-        def halton(index: int, base: int) -> float:
-            """Generate Halton sequence value."""
-            f = 1
-            result = 0
-            while index > 0:
-                f = f / base
-                result = result + f * (index % base)
-                index = index // base
-            return result
-            
-        points = np.zeros((n_points, 2))
-        for i in range(n_points):
-            points[i] = [
-                halton(i, 2) * self.domain_size[0],
-                halton(i, 3) * self.domain_size[1]
-            ]
-            
         return points
         
-    def _check_spacing(self, 
-                      point: np.ndarray,
-                      existing_points: List[np.ndarray]) -> bool:
-        """Check if point maintains minimum spacing with existing points."""
+    def _compute_field_gradients(self, field: np.ndarray) -> np.ndarray:
+        """Compute magnitude of field gradients."""
+        if self.neighbor_lists is None:
+            return np.zeros_like(field)
+            
+        gradients = np.zeros_like(field)
+        
+        for i, nbrs in enumerate(self.neighbor_lists):
+            if len(nbrs) > 1:
+                # Compute local gradients using neighbors
+                dx = self.points[nbrs] - self.points[i]
+                df = field[nbrs] - field[i]
+                
+                # Least squares fit for gradient
+                try:
+                    grad = np.linalg.lstsq(dx, df, rcond=None)[0]
+                    gradients[i] = np.linalg.norm(grad)
+                except np.linalg.LinAlgError:
+                    continue
+                    
+        return gradients
+        
+    def _compute_field_curvature(self, field: np.ndarray) -> np.ndarray:
+        """Compute field curvature."""
+        if self.neighbor_lists is None:
+            return np.zeros_like(field)
+            
+        curvature = np.zeros_like(field)
+        
+        for i, nbrs in enumerate(self.neighbor_lists):
+            if len(nbrs) > 2:
+                # Compute local quadratic fit
+                dx = self.points[nbrs] - self.points[i]
+                df = field[nbrs] - field[i]
+                
+                # Build quadratic terms
+                A = np.column_stack([
+                    dx[:,0]**2, dx[:,0]*dx[:,1], dx[:,1]**2,
+                    dx[:,0], dx[:,1], np.ones_like(dx[:,0])
+                ])
+                
+                try:
+                    # Solve for quadratic coefficients
+                    coeffs = np.linalg.lstsq(A, df, rcond=None)[0]
+                    # Approximate curvature from quadratic terms
+                    curvature[i] = np.abs(coeffs[0]) + np.abs(coeffs[2])
+                except np.linalg.LinAlgError:
+                    continue
+                    
+        return curvature
+        
+    def _check_point_spacing(self,
+                           point: np.ndarray,
+                           existing_points: List[np.ndarray]) -> bool:
+        """Check if point maintains minimum spacing."""
         if not existing_points:
             return True
             
         existing = np.array(existing_points)
         distances = np.linalg.norm(existing - point, axis=1)
-        return np.all(distances >= self.min_spacing)
+        return np.all(distances >= self.params.min_point_spacing)
         
     def _update_neighbor_lists(self, radius_factor: float = 2.5):
         """Update neighbor lists for all points."""
         self.kdtree = cKDTree(self.points)
-        
-        # Use maximum spacing to determine neighbor search radius
-        radius = radius_factor * self.max_spacing
+        radius = radius_factor * self.params.min_point_spacing
         
         self.neighbor_lists = [
             self.kdtree.query_ball_point(p, radius)
             for p in self.points
         ]
         
-    def refine_points(self,
-                     refinement_indicator: np.ndarray,
-                     threshold: float = 0.1) -> np.ndarray:
-        """
-        Refine point distribution based on error indicator.
-        
-        Args:
-            refinement_indicator: Error or refinement indicator field
-            threshold: Refinement threshold
-            
-        Returns:
-            Updated point coordinates
-        """
+    def get_refinement_metrics(self) -> Dict:
+        """Calculate mesh refinement metrics."""
         if self.points is None:
             raise ValueError("Points not initialized")
             
-        # Identify regions needing refinement
-        refine_mask = refinement_indicator > threshold
-        
-        # Add points in refinement regions
-        new_points = []
-        for i in range(len(self.points)):
-            if refine_mask[i]:
-                # Add points around high error point
-                new_points.extend(
-                    self._generate_refinement_points(self.points[i])
-                )
-                
-        if new_points:
-            # Add new points while maintaining minimum spacing
-            filtered_points = []
-            for p in new_points:
-                if self._check_spacing(p, list(self.points) + filtered_points):
-                    filtered_points.append(p)
-                    
-            if filtered_points:
-                self.points = np.vstack((self.points, np.array(filtered_points)))
-                self._update_neighbor_lists()
-                
-        return self.points
-        
-    def _generate_refinement_points(self,
-                                  center: np.ndarray,
-                                  n_points: int = 4) -> List[np.ndarray]:
-        """Generate new points around a center point."""
-        new_points = []
-        spacing = self.min_spacing
-        angles = np.linspace(0, 2*np.pi, n_points, endpoint=False)
-        
-        for theta in angles:
-            point = center + spacing * np.array([np.cos(theta), np.sin(theta)])
-            
-            # Check domain bounds
-            if (0 <= point[0] <= self.domain_size[0] and
-                0 <= point[1] <= self.domain_size[1]):
-                new_points.append(point)
-                
-        return new_points
-        
-    def coarsen_points(self,
-                      coarsening_indicator: np.ndarray,
-                      threshold: float = 0.01) -> np.ndarray:
-        """
-        Coarsen point distribution in regions of low error.
-        
-        Args:
-            coarsening_indicator: Error or coarsening indicator field
-            threshold: Coarsening threshold
-            
-        Returns:
-            Updated point coordinates
-        """
-        if self.points is None:
-            raise ValueError("Points not initialized")
-            
-        # Identify points that can be removed
-        coarsen_mask = coarsening_indicator < threshold
-        
-        if np.any(coarsen_mask):
-            # Keep points with low error density
-            self.points = self.points[~coarsen_mask]
-            self._update_neighbor_lists()
-            
-        return self.points
-        
-    def get_boundary_points(self) -> np.ndarray:
-        """Identify boundary points."""
-        if self.points is None:
-            raise ValueError("Points not initialized")
-            
-        tol = 1e-10  # Tolerance for boundary detection
-        
-        is_boundary = (
-            (np.abs(self.points[:,0]) < tol) |
-            (np.abs(self.points[:,0] - self.domain_size[0]) < tol) |
-            (np.abs(self.points[:,1]) < tol) |
-            (np.abs(self.points[:,1] - self.domain_size[1]) < tol)
-        )
-        
-        return self.points[is_boundary]
-        
-    def get_metrics(self) -> dict:
-        """Calculate mesh quality metrics."""
-        if self.points is None:
-            raise ValueError("Points not initialized")
-            
-        # Calculate nearest neighbor distances
-        distances, _ = self.kdtree.query(self.points, k=2)
-        min_distances = distances[:,1]  # Exclude self-distance
-        
         return {
             'n_points': len(self.points),
-            'min_spacing': float(np.min(min_distances)),
-            'max_spacing': float(np.max(min_distances)),
-            'mean_spacing': float(np.mean(min_distances)),
-            'spacing_std': float(np.std(min_distances)),
-            'mean_neighbors': float(np.mean([len(nbrs) for nbrs in self.neighbor_lists]))
+            'mean_refinement_level': float(np.mean(self.refinement_levels)),
+            'max_refinement_level': int(np.max(self.refinement_levels)),
+            'mean_feature_indicator': float(np.mean(self.feature_indicators)),
+            'refined_fraction': float(np.mean(self.refinement_levels > 0))
         }
