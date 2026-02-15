@@ -4,13 +4,16 @@ A meshless tumor growth simulation framework for computational oncology research
 
 ## What This Tool Does
 
-This simulator models brain tumor (glioma) growth and treatment response in 2D, incorporating:
+This simulator models brain tumor (glioma) growth and treatment response in 2D and 3D, incorporating:
 
 - **Cell cycle dynamics** — G1, S, G2, M phases with oxygen-dependent transitions to quiescence and necrosis
 - **Tissue heterogeneity** — different diffusion rates in white matter vs. gray matter (from MRI segmentation)
 - **Treatment modeling** — radiation (Linear-Quadratic model), chemotherapy (phase-specific drug effects), and immunotherapy (checkpoint inhibitor model)
 - **Immune response** — chemokine-mediated recruitment, infiltration, and tumor-immune interactions
 - **Adaptive mesh refinement** — automatic resolution increase at tumor boundaries
+- **3D support** — full 3D meshless simulation with spherical domains
+- **Patient-specific parameter fitting** — grid search over (ρ, D) using Dice coefficient with optional Nelder-Mead refinement
+- **Analytical validation** — 5 benchmarks against known solutions (Fisher-KPP, diffusion, exponential growth, LQ model, symmetry)
 
 ## Who This Is For
 
@@ -81,8 +84,12 @@ tumor-growth-rbf/
 │   │   ├── immune_response.py # Immune system dynamics
 │   │   └── tissue_properties.py # Tissue-specific parameters
 │   └── utils/             # Visualization and tools
-│       └── visualization.py
-├── tests/                 # Test suite (27 tests)
+│       ├── visualization.py
+│       └── parameter_fitting.py
+├── tests/                 # Test suite (63 tests)
+│   ├── test_all.py            # Unit tests
+│   ├── test_benchmarks.py     # Analytical validation benchmarks
+│   └── test_parameter_fitting.py  # Parameter fitting tests
 ├── docs/                  # Documentation
 │   └── CLINICAL_GUIDE.md  # Data preparation and clinical usage
 ├── demo.py                # Interactive learning demos
@@ -109,7 +116,17 @@ pip install pytest
 pytest tests/ -v
 ```
 
-All 27 tests cover: mesh operations, RBF-FD accuracy, cell cycle biology, treatment effects, positivity, and carrying capacity enforcement.
+All 63 tests cover: mesh operations, RBF-FD accuracy, cell cycle biology, treatment effects, positivity, carrying capacity enforcement, 3D operations, parameter fitting, and analytical validation benchmarks.
+
+### Analytical Validation Benchmarks
+
+| Benchmark | Metric | Error | Tolerance |
+|-----------|--------|-------|-----------|
+| Fisher-KPP growth-diffusion | Mass growth rate vs analytical | 0.32% | < 5% |
+| Pure diffusion (Gaussian) | Width σ(t) = √(σ₀² + 2Dt) | 0.25% | < 2% |
+| Exponential growth | Density u₀exp(ρt) | 0.07% | < 1% |
+| LQ cell survival | SF = exp(-αd - βd²) | ~10⁻¹⁴ | < 1% |
+| Radial symmetry | RMS deviation from radial Gaussian | 0.15% | < 5% |
 
 ## License
 
