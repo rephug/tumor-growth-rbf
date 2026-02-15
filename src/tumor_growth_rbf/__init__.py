@@ -14,6 +14,7 @@ from .core.rbf_solver import RBFSolver
 from .core.pde_assembler import PDEAssembler
 from .core.mesh_handler import MeshHandler
 from .utils.visualization import TumorVisualizer
+from .utils.parameter_fitting import ParameterFitter, FittingResult
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Robert Fuge"

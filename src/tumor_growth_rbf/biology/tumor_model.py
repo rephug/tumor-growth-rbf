@@ -391,6 +391,31 @@ class TumorModel:
         self.growth_modifier_map = self.tissue_model.get_growth_modifier_map()
         self.oxygen_perfusion_map = self.tissue_model.get_oxygen_perfusion_map()
 
+    def set_initial_density(self, density: np.ndarray):
+        """
+        Replace tumor density with a patient-specific initial condition.
+
+        Used by the parameter fitter to initialize the model with a
+        patient's tumor contour from imaging data (at time t₁) instead
+        of the default Gaussian blob.
+
+        Args:
+            density: 1D array of tumor density values, one per mesh point.
+                     Must have length == len(self.mesh.points).
+        """
+        if len(density) != len(self.mesh.points):
+            raise ValueError(
+                f"Density array length ({len(density)}) does not match "
+                f"number of mesh points ({len(self.mesh.points)})"
+            )
+        self.tumor_density = density.copy()
+
+        # Redistribute across cell cycle phases with realistic fractions
+        self.cell_populations.populations['G1'] = density * 0.60
+        self.cell_populations.populations['S'] = density * 0.20
+        self.cell_populations.populations['G2'] = density * 0.15
+        self.cell_populations.populations['M'] = density * 0.05
+
     # ------------------------------------------------------------------
     # Treatment interface
     # ------------------------------------------------------------------
