@@ -86,7 +86,7 @@ tumor-growth-rbf/
 │   └── utils/             # Visualization and tools
 │       ├── visualization.py
 │       └── parameter_fitting.py
-├── tests/                 # Test suite (63 tests)
+├── tests/                 # Test suite (71 tests)
 │   ├── test_all.py            # Unit tests
 │   ├── test_benchmarks.py     # Analytical validation benchmarks
 │   └── test_parameter_fitting.py  # Parameter fitting tests
@@ -106,8 +106,8 @@ tumor-growth-rbf/
 | `diffusion_white` | 0.1 | mm²/day | Diffusion in white matter |
 | `diffusion_grey` | 0.01 | mm²/day | Diffusion in grey matter |
 | `hypoxia_threshold` | 0.1 | — | O₂ level for quiescence |
-| `fractionation_alpha` | 0.15 | Gy⁻¹ | LQ model α parameter |
-| `fractionation_beta` | 0.05 | Gy⁻² | LQ model β parameter |
+| `fractionation_alpha` | 0.035 | Gy⁻¹ | LQ model α parameter |
+| `fractionation_beta` | 0.003 | Gy⁻² | LQ model β parameter |
 
 ## Testing
 
@@ -116,7 +116,7 @@ pip install pytest
 pytest tests/ -v
 ```
 
-All 63 tests cover: mesh operations, RBF-FD accuracy, cell cycle biology, treatment effects, positivity, carrying capacity enforcement, 3D operations, parameter fitting, and analytical validation benchmarks.
+All 71 tests cover: mesh operations, RBF-FD accuracy (Gaussian + PHS kernels), cell cycle biology, treatment effects (OER, resistant fraction, repopulation), positivity, carrying capacity enforcement, 3D operations, parameter fitting, and analytical validation benchmarks.
 
 ### Analytical Validation Benchmarks
 

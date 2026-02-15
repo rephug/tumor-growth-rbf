@@ -17,11 +17,16 @@ RBF-FD does the same thing but on SCATTERED points:
 The magic: these weights work for ANY point arrangement, not just grids.
 
 MATH BACKGROUND:
-- We use Gaussian RBFs: φ(r) = exp(-(ε*r)²)
-- ε (epsilon) is the "shape parameter" — controls how flat/peaked the basis functions are
+- Default kernel: Polyharmonic Spline (PHS): φ(r) = r^k (default k=3)
+  - NO shape parameter — unlike Gaussian, no tuning required
+  - Better conditioned interpolation matrices
+  - Recommended for modern RBF-FD (Flyer et al. 2016, Bayona et al. 2017)
+- Legacy kernel: Gaussian: φ(r) = exp(-(ε*r)²) — still available as fallback
+  - ε (epsilon) controls how flat/peaked the basis functions are
   - Small ε: flat, smooth, but ill-conditioned
   - Large ε: peaked, localized, but less accurate
-- We augment with polynomials for consistency (so constant/linear fields are exact)
+- Both kernels are augmented with polynomials for consistency
+  (so constant/linear/quadratic fields are reproduced exactly)
 """
 
 import numpy as np
@@ -44,24 +49,36 @@ class RBFSolver:
     def __init__(self,
                  epsilon: float = 1.0,
                  poly_degree: int = 2,
+                 kernel: str = "phs",
+                 phs_order: int = 3,
                  tol: float = 1e-10):
         """
         Args:
-            epsilon: RBF shape parameter (controls basis function width)
+            epsilon: RBF shape parameter (only used for Gaussian kernel)
             poly_degree: Degree of polynomial augmentation (0, 1, or 2)
                 - 0: constant reproduction
                 - 1: linear reproduction (recommended minimum)
                 - 2: quadratic reproduction (best accuracy)
+            kernel: RBF kernel type — "phs" (default) or "gaussian" (legacy)
+            phs_order: PHS order k (only used for PHS kernel, default 3)
+                - Odd k: φ(r) = r^k  (r^3, r^5, r^7)
+                - Even k: φ(r) = r^k * log(r)
             tol: Tolerance for numerical checks
         """
         self.epsilon = epsilon
         self.poly_degree = poly_degree
+        self.kernel = kernel
+        self.phs_order = phs_order
         self.tol = tol
         self._validate_parameters()
 
     def _validate_parameters(self):
-        if self.epsilon <= 0:
-            raise ValueError("Epsilon must be positive")
+        if self.kernel not in ("phs", "gaussian"):
+            raise ValueError(f"Unknown kernel: {self.kernel}")
+        if self.kernel == "gaussian" and self.epsilon <= 0:
+            raise ValueError("Epsilon must be positive for Gaussian kernel")
+        if self.kernel == "phs" and self.phs_order < 1:
+            raise ValueError("PHS order must be >= 1")
         if self.poly_degree < 0:
             raise ValueError("Polynomial degree must be non-negative")
 
@@ -100,7 +117,7 @@ class RBFSolver:
         for i in range(n):
             for j in range(n):
                 r = np.linalg.norm(neighbors[i] - neighbors[j])
-                A[i, j] = self._gaussian_rbf(r)
+                A[i, j] = self._phi(r)
 
         # Polynomial matrix
         P = self._build_poly_matrix(neighbors)
@@ -148,26 +165,31 @@ class RBFSolver:
 
         # RBF part: L[φ(||x - x_j||)] evaluated at center
         if operator == "laplacian":
-            laplacian_fn = (self._laplacian_gaussian_rbf_2d if ndim == 2
-                            else self._laplacian_gaussian_rbf_3d)
+            if self.kernel == "phs":
+                lap_fn = (self._laplacian_phs_2d if ndim == 2
+                          else self._laplacian_phs_3d)
+            else:
+                lap_fn = (self._laplacian_gaussian_rbf_2d if ndim == 2
+                          else self._laplacian_gaussian_rbf_3d)
             for j in range(n_points):
                 r = np.linalg.norm(center - neighbors[j])
-                rhs[j] = laplacian_fn(r)
-        elif operator == "gradient_x":
+                rhs[j] = lap_fn(r)
+
+        elif operator in ("gradient_x", "gradient_y", "gradient_z"):
+            comp = {"gradient_x": 0, "gradient_y": 1, "gradient_z": 2}[operator]
             for j in range(n_points):
                 diff = center - neighbors[j]
                 r = np.linalg.norm(diff)
-                rhs[j] = self._gradient_x_gaussian_rbf(r, diff)
-        elif operator == "gradient_y":
-            for j in range(n_points):
-                diff = center - neighbors[j]
-                r = np.linalg.norm(diff)
-                rhs[j] = self._gradient_y_gaussian_rbf(r, diff)
-        elif operator == "gradient_z":
-            for j in range(n_points):
-                diff = center - neighbors[j]
-                r = np.linalg.norm(diff)
-                rhs[j] = self._gradient_z_gaussian_rbf(r, diff)
+                if self.kernel == "phs":
+                    rhs[j] = self._gradient_phs(r, diff, comp)
+                else:
+                    grad_fns = {
+                        "gradient_x": self._gradient_x_gaussian_rbf,
+                        "gradient_y": self._gradient_y_gaussian_rbf,
+                        "gradient_z": self._gradient_z_gaussian_rbf,
+                    }
+                    rhs[j] = grad_fns[operator](r, diff)
+
         else:
             raise ValueError(f"Unknown operator: {operator}")
 
@@ -258,9 +280,32 @@ class RBFSolver:
     # RBF kernel and its derivatives
     # ----------------------------------------------------------------
 
+    def _phi(self, r: float) -> float:
+        """Evaluate the RBF kernel at distance r (dispatches to active kernel)."""
+        if self.kernel == "phs":
+            return self._phs_rbf(r)
+        else:
+            return self._gaussian_rbf(r)
+
     def _gaussian_rbf(self, r: float) -> float:
         """Gaussian RBF: φ(r) = exp(-(ε*r)²)"""
         return np.exp(-(self.epsilon * r) ** 2)
+
+    def _phs_rbf(self, r) -> float:
+        """
+        Polyharmonic Spline RBF.
+
+        Odd order k: φ(r) = r^k   (r^3, r^5, r^7, ...)
+        Even order k: φ(r) = r^k * log(r)   (r^2*log(r), r^4*log(r), ...)
+        """
+        k = self.phs_order
+        if k % 2 == 1:
+            return r ** k
+        else:
+            if isinstance(r, np.ndarray):
+                return np.where(r > 0, r ** k * np.log(r), 0.0)
+            else:
+                return r ** k * np.log(r) if r > 0 else 0.0
 
     def _laplacian_gaussian_rbf_2d(self, r: float) -> float:
         """
@@ -329,6 +374,64 @@ class RBFSolver:
             return 0.0
         e = self.epsilon
         return -2.0 * e ** 2 * diff[2] * np.exp(-(e * r) ** 2)
+
+    # ----------------------------------------------------------------
+    # PHS kernel derivatives
+    # ----------------------------------------------------------------
+
+    def _laplacian_phs_2d(self, r: float) -> float:
+        """
+        Laplacian of PHS in 2D.
+
+        For odd k:  φ(r) = r^k
+            dφ/dr = k * r^(k-1)
+            d²φ/dr² = k*(k-1) * r^(k-2)
+            ∇²φ = d²φ/dr² + (1/r)*dφ/dr = k² * r^(k-2)
+
+        For even k: φ(r) = r^k * log(r)
+            ∇²φ = r^(k-2) * (k² * log(r) + 2k)
+        """
+        k = self.phs_order
+        if r < 1e-15:
+            return 0.0
+        if k % 2 == 1:
+            return k * k * r ** (k - 2)
+        else:
+            return r ** (k - 2) * (k * k * np.log(r) + 2 * k)
+
+    def _laplacian_phs_3d(self, r: float) -> float:
+        """
+        Laplacian of PHS in 3D.
+
+        For odd k:  φ(r) = r^k
+            ∇²φ = d²φ/dr² + (2/r)*dφ/dr = k*(k+1) * r^(k-2)
+
+        For even k: φ(r) = r^k * log(r)
+            ∇²φ = r^(k-2) * (k*(k+1) * log(r) + 2k + 1)
+        """
+        k = self.phs_order
+        if r < 1e-15:
+            return 0.0
+        if k % 2 == 1:
+            return k * (k + 1) * r ** (k - 2)
+        else:
+            return r ** (k - 2) * (k * (k + 1) * np.log(r) + 2 * k + 1)
+
+    def _gradient_phs(self, r: float, diff: np.ndarray,
+                      component: int) -> float:
+        """
+        Gradient component of PHS.
+
+        For odd k:  dφ/dx_i = k * r^(k-2) * (x_i - x_j_i)
+        For even k: dφ/dx_i = r^(k-2) * (k*log(r) + 1) * (x_i - x_j_i)
+        """
+        k = self.phs_order
+        if r < 1e-15:
+            return 0.0
+        if k % 2 == 1:
+            return k * r ** (k - 2) * diff[component]
+        else:
+            return r ** (k - 2) * (k * np.log(r) + 1) * diff[component]
 
     # ----------------------------------------------------------------
     # Polynomial basis and its derivatives

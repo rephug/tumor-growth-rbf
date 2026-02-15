@@ -9,7 +9,7 @@ import pytest
 from tumor_growth_rbf import (
     TumorModel, TumorParameters,
     CellPopulationModel, CellCycleParameters,
-    TreatmentModule, TreatmentParameters,
+    TreatmentModule, TreatmentParameters, oxygen_enhancement_ratio,
     ImmuneResponse, ImmuneParameters,
     MeshHandler, RBFSolver, PDEAssembler,
     TissueModel, TissueParameters, TissueType,
@@ -107,6 +107,62 @@ class TestRBFSolver:
         interior = ((mesh.points[:, 0] > 1) & (mesh.points[:, 0] < 9) &
                     (mesh.points[:, 1] > 1) & (mesh.points[:, 1] < 9))
         assert np.allclose(result[interior], 3.0, atol=1e-4)
+
+    def test_phs_laplacian_quadratic(self):
+        """PHS kernel: ∇²(x² + y²) = 4 everywhere (exact with poly_degree=2)."""
+        rbf = RBFSolver(kernel="phs", phs_order=3, poly_degree=2)
+        mesh = MeshHandler(domain_size=(10.0, 10.0))
+        mesh.initialize_points(300, distribution="halton")
+
+        f = mesh.points[:, 0] ** 2 + mesh.points[:, 1] ** 2
+        L = rbf.assemble_global_operator(
+            mesh.points, mesh.neighbor_lists, "laplacian"
+        )
+        result = L @ f
+
+        interior = ((mesh.points[:, 0] > 1) & (mesh.points[:, 0] < 9) &
+                    (mesh.points[:, 1] > 1) & (mesh.points[:, 1] < 9))
+        assert np.allclose(result[interior], 4.0, atol=1e-6)
+
+    def test_phs_no_epsilon_sensitivity(self):
+        """PHS results are stable across different phs_order values (3, 5, 7)."""
+        mesh = MeshHandler(domain_size=(10.0, 10.0))
+        mesh.initialize_points(300, distribution="halton")
+
+        f = mesh.points[:, 0] ** 2 + mesh.points[:, 1] ** 2
+        interior = ((mesh.points[:, 0] > 1) & (mesh.points[:, 0] < 9) &
+                    (mesh.points[:, 1] > 1) & (mesh.points[:, 1] < 9))
+
+        for order in [3, 5, 7]:
+            rbf = RBFSolver(kernel="phs", phs_order=order, poly_degree=2)
+            L = rbf.assemble_global_operator(
+                mesh.points, mesh.neighbor_lists, "laplacian"
+            )
+            result = (L @ f)[interior]
+            assert np.allclose(result, 4.0, atol=1e-4), \
+                f"PHS order {order}: max error = {np.max(np.abs(result - 4.0)):.2e}"
+
+    def test_phs_better_conditioning(self):
+        """PHS interpolation matrices have comparable or better conditioning than Gaussian."""
+        mesh = MeshHandler(domain_size=(10.0, 10.0))
+        mesh.initialize_points(300, distribution="halton")
+
+        # Pick an interior stencil
+        center = mesh.points[50]
+        nbrs = mesh.points[mesh.neighbor_lists[50]]
+
+        phs = RBFSolver(kernel="phs", phs_order=3, poly_degree=2)
+        gauss = RBFSolver(kernel="gaussian", epsilon=1.0, poly_degree=2)
+
+        A_phs, _ = phs.build_local_matrices(center, nbrs)
+        A_gauss, _ = gauss.build_local_matrices(center, nbrs)
+
+        cond_phs = np.linalg.cond(A_phs)
+        cond_gauss = np.linalg.cond(A_gauss)
+
+        # PHS should have comparable or better conditioning
+        assert cond_phs < cond_gauss * 10, \
+            f"PHS cond={cond_phs:.1e}, Gaussian cond={cond_gauss:.1e}"
 
 
 # =============================================================
@@ -224,6 +280,76 @@ class TestTreatments:
         )
         assert metrics['total_cells_killed'] > 0
 
+    def test_oer_function_values(self):
+        """Test Alper-Howard-Flanders OER function at known points."""
+        # At very high pO2, OER -> 1.0
+        oer_high = oxygen_enhancement_ratio(np.array([100.0, 200.0]),
+                                            m=3.0, K=3.0)
+        assert np.all(oer_high < 1.10)  # OER(100)≈1.058, OER(200)≈1.030
+        assert np.all(oer_high >= 1.0)
+
+        # At pO2 = 0, OER = m exactly
+        oer_zero = oxygen_enhancement_ratio(np.array([0.0]), m=3.0, K=3.0)
+        assert np.isclose(oer_zero[0], 3.0)
+
+        # At pO2 = K, OER = (m+1)/2
+        oer_half = oxygen_enhancement_ratio(np.array([3.0]), m=3.0, K=3.0)
+        assert np.isclose(oer_half[0], (3.0 + 1.0) / 2.0)
+
+        # Monotonically decreasing: higher pO2 -> lower OER
+        pO2_values = np.array([0.0, 1.0, 3.0, 10.0, 40.0])
+        oer_values = oxygen_enhancement_ratio(pO2_values, m=3.0, K=3.0)
+        assert np.all(np.diff(oer_values) < 0)  # strictly decreasing
+
+    def test_oer_reduces_radiation_effect(self, populations):
+        """Hypoxic cells should survive radiation better than normoxic cells."""
+        n = 50
+        # Half points normoxic (O2=1.0), half severely hypoxic (O2=0.01)
+        oxygen = np.ones(n)
+        oxygen[n // 2:] = 0.01  # ~0.4 mmHg pO2
+
+        module = TreatmentModule()
+        effects, metrics = module.apply_treatment(
+            "radiation", populations, oxygen, dose=2.0
+        )
+
+        # For G1 phase: hypoxic half should have less killing
+        normoxic_kill = np.mean(np.abs(effects['G1'][:n // 2]))
+        hypoxic_kill = np.mean(np.abs(effects['G1'][n // 2:]))
+        assert hypoxic_kill < normoxic_kill, (
+            f"Hypoxic cells should survive better: "
+            f"hypoxic_kill={hypoxic_kill:.6f}, normoxic_kill={normoxic_kill:.6f}"
+        )
+
+        # OER metric should be present and > 1.0
+        assert 'mean_oer' in metrics
+        assert metrics['mean_oer'] > 1.0
+
+    def test_oer_unity_at_high_oxygen(self, populations):
+        """At normoxic O2, OER should be close to 1.0 (minimal effect)."""
+        module = TreatmentModule()
+
+        # Fully normoxic
+        oxygen_full = np.ones(50)
+        effects_full, _ = module.apply_treatment(
+            "radiation", populations, oxygen_full, dose=2.0
+        )
+
+        # With OER disabled (oer_max=1.0)
+        module_no_oer = TreatmentModule(TreatmentParameters(oer_max=1.0))
+        effects_no_oer, _ = module_no_oer.apply_treatment(
+            "radiation", populations, oxygen_full, dose=2.0
+        )
+
+        # At O2=1.0 (pO2=40 mmHg), OER ≈ 1.14
+        # With OER, slightly less killing (OER > 1 reduces alpha/beta)
+        g1_kill_oer = np.mean(np.abs(effects_full['G1']))
+        g1_kill_no_oer = np.mean(np.abs(effects_no_oer['G1']))
+        assert g1_kill_oer < g1_kill_no_oer
+        # But the difference should be small (< 30%)
+        ratio = g1_kill_oer / g1_kill_no_oer
+        assert ratio > 0.7, f"Kill ratio {ratio:.3f} too different at normoxic O2"
+
 
 # =============================================================
 # Integration: Full TumorModel
@@ -307,6 +433,127 @@ class TestTumorModel:
             model.update(0.1)
         m = model.get_metrics()
         assert m['tumor']['total_mass'] > 0
+
+    @staticmethod
+    def _isolated_tumor_params(**overrides):
+        """TumorParameters with oxygen/hypoxia disabled for clean tests."""
+        defaults = dict(
+            growth_rate=0.1,
+            diffusion_white=0.01,
+            carrying_capacity=10.0,
+            oxygen_consumption=0.0,
+            hypoxia_threshold=0.0,
+        )
+        defaults.update(overrides)
+        return TumorParameters(**defaults)
+
+    @staticmethod
+    def _frozen_cell_cycle():
+        """Cell cycle parameters with all transitions disabled."""
+        return CellCycleParameters(
+            g1_to_s_rate=0.0, s_to_g2_rate=0.0,
+            g2_to_m_rate=0.0, m_to_g1_rate=0.0,
+        )
+
+    @staticmethod
+    def _silent_immune():
+        """Immune parameters that produce zero effect."""
+        return ImmuneParameters(
+            recruitment_rate=0.0, killing_rate=0.0,
+            chemokine_production=0.0, chemotaxis_strength=0.0,
+        )
+
+    def test_repopulation_increases_regrowth(self):
+        """After treatment + kick_time, repopulation should accelerate growth."""
+        # Isolate repopulation: disable oxygen, cell cycle, immune
+        # so only logistic growth + repopulation factor are active
+        model_repop = TumorModel(
+            domain_size=(20.0, 20.0),
+            params=self._isolated_tumor_params(
+                repopulation_kick_time=5.0,
+                repopulation_factor=2.0,
+            ),
+            cell_cycle_params=self._frozen_cell_cycle(),
+            immune_params=self._silent_immune(),
+            n_initial_points=400,
+        )
+
+        model_no_repop = TumorModel(
+            domain_size=(20.0, 20.0),
+            params=self._isolated_tumor_params(
+                repopulation_kick_time=5.0,
+                repopulation_factor=1.0,
+            ),
+            cell_cycle_params=self._frozen_cell_cycle(),
+            immune_params=self._silent_immune(),
+            n_initial_points=400,
+        )
+
+        dt = 0.1
+        # Grow both for 2 days
+        for _ in range(20):
+            model_repop.update(dt)
+            model_no_repop.update(dt)
+
+        # Apply treatment to both (triggers repopulation clock)
+        model_repop.apply_treatment("radiation", dose=2.0)
+        model_no_repop.apply_treatment("radiation", dose=2.0)
+
+        # Advance past kick_time (5 days) + ramp (14 days) = 19+ days
+        for _ in range(250):
+            model_repop.update(dt)
+            model_no_repop.update(dt)
+
+        # Model with repopulation should have more mass (faster regrowth)
+        mass_repop = model_repop.get_metrics()['tumor']['total_mass']
+        mass_no_repop = model_no_repop.get_metrics()['tumor']['total_mass']
+        assert mass_repop > mass_no_repop, (
+            f"Repopulation model mass ({mass_repop:.4f}) should exceed "
+            f"no-repopulation mass ({mass_no_repop:.4f})"
+        )
+
+    def test_no_repopulation_without_treatment(self):
+        """Without treatment, repopulation parameters should have no effect."""
+        # Isolate repopulation: disable oxygen, cell cycle, immune
+        model_repop = TumorModel(
+            domain_size=(20.0, 20.0),
+            params=self._isolated_tumor_params(
+                repopulation_kick_time=5.0,
+                repopulation_factor=3.0,  # High factor to detect any leak
+            ),
+            cell_cycle_params=self._frozen_cell_cycle(),
+            immune_params=self._silent_immune(),
+            n_initial_points=400,
+        )
+
+        model_base = TumorModel(
+            domain_size=(20.0, 20.0),
+            params=self._isolated_tumor_params(
+                repopulation_kick_time=5.0,
+                repopulation_factor=1.0,
+            ),
+            cell_cycle_params=self._frozen_cell_cycle(),
+            immune_params=self._silent_immune(),
+            n_initial_points=400,
+        )
+
+        dt = 0.1
+        # Grow both for 30 days — no treatment applied
+        for _ in range(300):
+            model_repop.update(dt)
+            model_base.update(dt)
+
+        mass_repop = model_repop.get_metrics()['tumor']['total_mass']
+        mass_base = model_base.get_metrics()['tumor']['total_mass']
+
+        # Should be essentially identical (no treatment → no repopulation)
+        assert mass_repop > 0.1, (
+            f"Tumor mass should be positive after 30 days of growth: {mass_repop:.4f}"
+        )
+        assert abs(mass_repop - mass_base) < 0.01 * max(mass_repop, mass_base), (
+            f"Without treatment, masses should match: "
+            f"repop={mass_repop:.4f}, base={mass_base:.4f}"
+        )
 
 
 # =============================================================

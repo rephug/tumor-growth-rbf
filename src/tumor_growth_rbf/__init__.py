@@ -7,7 +7,7 @@ Radial Basis Function-generated Finite Differences (RBF-FD).
 
 from .biology.tumor_model import TumorModel, TumorParameters
 from .biology.cell_populations import CellPopulationModel, CellCycleParameters
-from .biology.treatments import TreatmentModule, TreatmentParameters
+from .biology.treatments import TreatmentModule, TreatmentParameters, oxygen_enhancement_ratio
 from .biology.immune_response import ImmuneResponse, ImmuneParameters
 from .biology.tissue_properties import TissueModel, TissueParameters, TissueType
 from .core.rbf_solver import RBFSolver

@@ -14,7 +14,8 @@ where D = dose, α = linear damage, β = quadratic damage.
 
 Key concepts:
 - α/β ratio: Determines fractionation sensitivity (~10 Gy for tumors)
-- Oxygen Enhancement Ratio (OER): Hypoxic cells need 2-3x more dose
+- Oxygen Enhancement Ratio (OER): Hypoxic cells are 2-3x more radioresistant.
+  Modeled via Alper-Howard-Flanders: OER = (m*K + pO2) / (K + pO2)
 - Cell cycle sensitivity: M/G2 most sensitive, S most resistant
 
 CHEMOTHERAPY:
@@ -37,15 +38,45 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def oxygen_enhancement_ratio(pO2, m=3.0, K=3.0):
+    """
+    Alper-Howard-Flanders OER model.
+
+    Computes the Oxygen Enhancement Ratio as a function of partial
+    oxygen pressure. The OER describes how much more resistant
+    hypoxic cells are to radiation compared to well-oxygenated cells.
+
+    Model:  OER(pO2) = (m * K + pO2) / (K + pO2)
+
+    Behavior:
+        - pO2 -> 0:   OER -> m   (maximum radioresistance)
+        - pO2 -> inf:  OER -> 1.0 (fully oxygenated, full sensitivity)
+        - pO2 = K:     OER = (m + 1) / 2  (half-way between m and 1)
+
+    Args:
+        pO2: Partial oxygen pressure in mmHg. Can be scalar or array.
+        m: Maximum OER at complete anoxia (default: 3.0).
+        K: Half-effect oxygen tension in mmHg (default: 3.0).
+
+    Returns:
+        OER values, same shape as pO2. Always >= 1.0.
+
+    Reference:
+        Carlson DJ et al. Phys Med Biol 49:4477-4491, 2004.
+    """
+    return (m * K + pO2) / (K + pO2)
+
+
 @dataclass
 class TreatmentParameters:
     """Parameters for treatment modalities with cell cycle specificity."""
 
     # --- Radiation therapy ---
     radiation_sensitivity: float = 0.3      # Base sensitivity
-    oxygen_enhancement: float = 2.0         # OER
-    fractionation_alpha: float = 0.15       # α in LQ model (Gy⁻¹)
-    fractionation_beta: float = 0.05        # β in LQ model (Gy⁻²)
+    oer_max: float = 3.0                    # Maximum OER at anoxia (Alper-Howard-Flanders m)
+    oer_half_effect: float = 3.0            # Half-effect pO₂ in mmHg (Alper-Howard-Flanders K)
+    fractionation_alpha: float = 0.035      # α in LQ model (Gy⁻¹), GBM range: 0.01-0.10
+    fractionation_beta: float = 0.003       # β in LQ model (Gy⁻²), gives α/β ≈ 11.7 Gy
 
     # Phase-specific radiation sensitivity multipliers
     # Based on experimental radiosensitivity measurements
@@ -53,7 +84,15 @@ class TreatmentParameters:
     radiation_s_factor: float = 0.5    # S: most resistant (active DNA repair)
     radiation_g2_factor: float = 1.5   # G2: sensitive (4N DNA content)
     radiation_m_factor: float = 2.0    # M: most sensitive (condensed chromatin)
-    radiation_q_factor: float = 0.8    # Q: resistant (not dividing)
+    radiation_q_factor: float = 0.4    # Q: resistant (not dividing, reduced α by 0.3-0.5×)
+
+    # Treatment-resistant subpopulation
+    # Represents cells with inherent resistance (e.g., glioma stem cells,
+    # cells with enhanced DNA repair). These survive full treatment courses
+    # and seed regrowth. Published estimates: 5-15% for GBM.
+    resistant_fraction: float = 0.10          # Fraction of cells inherently resistant
+    resistant_radiation_factor: float = 0.05  # Residual radiation sensitivity of resistant cells
+    resistant_chemo_factor: float = 0.10      # Residual chemo sensitivity of resistant cells
 
     # --- Chemotherapy ---
     chemo_sensitivity: float = 0.2     # Base drug sensitivity
@@ -156,29 +195,48 @@ class TreatmentModule:
             α = probability of lethal single-track damage (Gy⁻¹)
             β = probability of lethal double-track damage (Gy⁻²)
 
-        For a 2 Gy fraction with typical tumor α/β = 10 Gy:
-            Survival ≈ exp(-0.15*2 - 0.05*4) = exp(-0.50) ≈ 0.61
-        So ~39% of cells are killed per fraction.
+        For a 2 Gy fraction with GBM parameters (α=0.035, α/β≈11.7 Gy):
+            At normoxic pO₂=40 mmHg, OER≈1.14:
+            α_eff = 0.035/1.14 = 0.031, β_eff = 0.003/1.30 = 0.0023
+            Survival ≈ exp(-0.031*2 - 0.0023*4) = exp(-0.071) ≈ 0.93
+        At hypoxic pO₂=1 mmHg, OER≈2.5:
+            α_eff = 0.035/2.5 = 0.014, β_eff = 0.003/6.25 = 0.00048
+            Survival ≈ exp(-0.014*2 - 0.00048*4) = exp(-0.030) ≈ 0.97
 
-        OXYGEN EFFECT: Hypoxic cells are 2-3x more resistant.
-        We model this with the Oxygen Enhancement Ratio (OER):
-            effective_dose = dose * (1 + (OER-1) * O₂)
+        TREATMENT-RESISTANT FRACTION: A subpopulation (default 10%) of
+        cells with inherent resistance (e.g., glioma stem cells, enhanced
+        DNA repair). These cells have heavily attenuated LQ sensitivity
+        and survive full treatment courses to seed regrowth.
+
+        OXYGEN EFFECT (Alper-Howard-Flanders model):
+        Hypoxic cells are up to 3x more radioresistant due to reduced
+        free-radical fixation in the absence of oxygen. OER modifies
+        the LQ parameters, not the delivered dose:
+            OER = (m*K + pO₂) / (K + pO₂)
+            α_eff = α / OER,  β_eff = β / OER²
+        where pO₂ = oxygen * 40 mmHg (normoxic mapping).
+        Ref: Carlson DJ et al. Phys Med Biol 49:4477, 2004.
         """
         # Track cumulative dose
         self.cumulative_dose += dose
 
-        # Compute effective dose with oxygen enhancement
+        # Compute physical dose at each point (tissue-specific modifier)
+        physical_dose = dose * np.ones_like(self.cumulative_dose)
+        if radiation_modifier is not None:
+            physical_dose *= radiation_modifier
+
+        # Compute OER from local oxygen concentration
+        # Map normalized oxygen [0,1] to pO₂ [0,40] mmHg
+        # (oxygen=1.0 corresponds to ~40 mmHg normoxic tissue pO₂)
         if oxygen_concentration is not None:
-            effective_dose = dose * (
-                1.0 + (self.params.oxygen_enhancement - 1.0) *
-                oxygen_concentration
+            pO2 = oxygen_concentration * 40.0
+            oer = oxygen_enhancement_ratio(
+                pO2,
+                m=self.params.oer_max,
+                K=self.params.oer_half_effect,
             )
         else:
-            effective_dose = dose * np.ones_like(self.cumulative_dose)
-
-        # Apply tissue-specific modifier if available
-        if radiation_modifier is not None:
-            effective_dose *= radiation_modifier
+            oer = np.ones_like(self.cumulative_dose)
 
         # Phase-specific sensitivity factors
         phase_factors = {
@@ -202,12 +260,32 @@ class TreatmentModule:
             alpha = self.params.fractionation_alpha * sensitivity
             beta = self.params.fractionation_beta * sensitivity
 
-            # LQ survival fraction
-            survival = np.exp(-alpha * effective_dose -
-                              beta * effective_dose ** 2)
+            # Apply OER: reduces radiosensitivity under hypoxia
+            # OER is a physical (oxygen chemistry) effect that applies
+            # equally to all cells regardless of intrinsic resistance
+            alpha_eff = alpha / oer
+            beta_eff = beta / (oer ** 2)
 
-            # Effect = killed cells (negative change)
-            effect = -(1.0 - survival) * population
+            # LQ survival for treatable cells
+            survival = np.exp(-alpha_eff * physical_dose -
+                              beta_eff * physical_dose ** 2)
+
+            # LQ survival for resistant cells (attenuated α/β, also OER-modified)
+            alpha_r = alpha * self.params.resistant_radiation_factor
+            beta_r = beta * self.params.resistant_radiation_factor
+            alpha_r_eff = alpha_r / oer
+            beta_r_eff = beta_r / (oer ** 2)
+            survival_resistant = np.exp(-alpha_r_eff * physical_dose -
+                                        beta_r_eff * physical_dose ** 2)
+
+            # Split population into treatable and resistant subpopulations
+            treatable = population * (1.0 - self.params.resistant_fraction)
+            resistant = population * self.params.resistant_fraction
+
+            # Combined effect: treatable cells get full LQ kill,
+            # resistant cells get heavily attenuated kill
+            effect = (-(1.0 - survival) * treatable
+                      - (1.0 - survival_resistant) * resistant)
             effects[phase] = effect
             total_killed -= float(np.sum(effect))
 
@@ -216,8 +294,11 @@ class TreatmentModule:
             'cumulative_dose': float(np.mean(self.cumulative_dose)),
             'total_cells_killed': total_killed,
             'mean_survival_fraction': float(np.mean(
-                np.exp(-self.params.fractionation_alpha * effective_dose)
+                np.exp(-self.params.fractionation_alpha / oer * physical_dose -
+                       self.params.fractionation_beta / (oer ** 2) *
+                       physical_dose ** 2)
             )),
+            'mean_oer': float(np.mean(oer)),
         }
 
         return effects, metrics
@@ -268,7 +349,15 @@ class TreatmentModule:
                            phase_factors.get(phase, 1.0))
             drug_effect = sensitivity * self.drug_concentration * above_threshold
 
-            effect = -drug_effect * population
+            # Split population into treatable and resistant subpopulations
+            treatable = population * (1.0 - self.params.resistant_fraction)
+            resistant = population * self.params.resistant_fraction
+
+            # Resistant cells have heavily attenuated chemo sensitivity
+            drug_effect_r = (drug_effect *
+                             self.params.resistant_chemo_factor)
+
+            effect = -drug_effect * treatable - drug_effect_r * resistant
             effects[phase] = effect
             total_killed -= float(np.sum(effect))
 

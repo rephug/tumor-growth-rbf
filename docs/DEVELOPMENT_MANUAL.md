@@ -4,7 +4,7 @@
 
 **Purpose of this document:** This manual provides a detailed, step-by-step development plan for taking the tumor growth simulator from its current research prototype to a validated tool that can meaningfully assist in clinical oncology research and, eventually, treatment planning. Each section describes *what* needs to be built, *why* it matters, *how* to implement it technically, *what to test*, and *what literature to reference*.
 
-**Current state (v0.2):** Working 2D simulator with meshless RBF-FD spatial discretization, cell cycle dynamics (G1/S/G2/M/Q/N), tissue-heterogeneous diffusion, treatment modeling (radiation via Linear-Quadratic model, chemotherapy with phase-specific sensitivity, immunotherapy), immune response, and adaptive mesh refinement. All 27 tests pass. Synthetic initial conditions; no real patient data integration yet.
+**Current state (v0.3):** Working 2D/3D simulator with meshless RBF-FD spatial discretization, cell cycle dynamics (G1/S/G2/M/Q/N), tissue-heterogeneous diffusion, treatment modeling (radiation via Linear-Quadratic model with Alper-Howard-Flanders OER, chemotherapy with phase-specific sensitivity, immunotherapy), immune response, adaptive mesh refinement, patient-specific parameter fitting, treatment-resistant subpopulations, and accelerated post-treatment repopulation. All 71 tests pass across 3 test files. 5 analytical benchmarks validated. Synthetic initial conditions; no real patient data integration yet.
 
 ---
 
@@ -952,9 +952,10 @@ As the tool matures toward clinical relevance, testing standards must increase:
 
 | Level | What | Current | Target |
 |-------|------|---------|--------|
-| Unit tests | Individual functions | 27 tests | 100+ tests |
+| Unit tests | Individual functions | 47 tests | 100+ tests |
 | Integration tests | Module interactions | Basic | Comprehensive |
-| Benchmark tests | Known analytical solutions | None | 5+ benchmarks (Phase 1C) |
+| Benchmark tests | Known analytical solutions | 5 benchmarks | 5+ benchmarks (Phase 1C) |
+| Parameter fitting tests | Known parameter recovery | 16 tests | Expand coverage |
 | Regression tests | Results don't change unexpectedly | None | Full regression suite |
 | Clinical validation | Comparison with patient data | None | Phase 3C |
 
@@ -1003,8 +1004,8 @@ Expected bottlenecks (in order):
 ### Version Control and Release Strategy
 
 - **Semantic versioning**: MAJOR.MINOR.PATCH
-  - v0.2: Current (2D, synthetic data, working biology)
-  - v0.3: 3D extension
+  - v0.2: 2D, synthetic data, working biology
+  - v0.3: Current (3D extension, parameter fitting, analytical benchmarks, OER, resistant fraction, repopulation)
   - v0.4: Medical image I/O
   - v0.5: DTI anisotropic diffusion
   - v1.0: First release with clinical validation results
@@ -1130,26 +1131,29 @@ tumor_model.py (integration layer)
 | Scattered points (not grid) | Natural for adaptive refinement; tumor boundary gets more points automatically |
 | Biology modules are pointwise | Clean separation; biology doesn't know about spatial dimension; same code works 2D/3D |
 | Spatial operators passed to biology | Biology modules never build operators; they receive ∇²c, ∇c from the integration layer |
-| Gaussian RBF with polynomial augmentation | Exact polynomial reproduction; well-understood convergence properties |
+| PHS RBF-FD with polynomial augmentation | Shape-parameter-free; exact polynomial reproduction; better conditioned than Gaussian (Flyer et al. 2016) |
 | Cell cycle as separate populations | Enables phase-specific treatment effects (the whole point of modeling the cell cycle) |
 
-### Files and Line Counts (v0.2)
+### Files and Line Counts (v0.3)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| mesh_handler.py | ~280 | Point generation, neighbors, refinement |
-| rbf_solver.py | ~150 | RBF-FD weight computation |
-| pde_assembler.py | ~90 | Sparse operator assembly |
-| cell_populations.py | ~180 | Cell cycle dynamics |
-| treatments.py | ~260 | Radiation, chemo, immunotherapy |
-| immune_response.py | ~140 | Immune cell dynamics |
-| tissue_properties.py | ~200 | Tissue-specific parameters |
-| tumor_model.py | ~350 | Main integration class |
+| mesh_handler.py | ~380 | Point generation, neighbors, refinement (2D/3D) |
+| rbf_solver.py | ~480 | RBF-FD weight computation (2D/3D) |
+| pde_assembler.py | ~185 | Sparse operator assembly |
+| cell_populations.py | ~320 | Cell cycle dynamics |
+| treatments.py | ~450 | Radiation (LQ + OER), chemo, immunotherapy, resistant fraction |
+| immune_response.py | ~250 | Immune cell dynamics |
+| tissue_properties.py | ~240 | Tissue-specific parameters |
+| tumor_model.py | ~550 | Main integration class (2D/3D, repopulation) |
 | visualization.py | ~180 | Plotting utilities |
-| test_all.py | ~280 | 27 tests |
-| demo.py | ~400 | 5 interactive demos |
-| clinical_workflow.py | ~300 | Clinical example |
-| **Total** | **~2,810** | |
+| parameter_fitting.py | ~350 | Grid search + Nelder-Mead refinement |
+| test_all.py | ~650 | 47 unit tests (2D, 3D, OER, repopulation) |
+| test_benchmarks.py | ~455 | 5 analytical validation benchmarks |
+| test_parameter_fitting.py | ~340 | 16 parameter fitting tests |
+| demo.py | ~450 | 5 interactive demos |
+| clinical_workflow.py | ~530 | Clinical Stupp protocol example |
+| **Total** | **~5,810** | |
 
 ---
 

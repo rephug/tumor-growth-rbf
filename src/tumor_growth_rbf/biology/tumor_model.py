@@ -67,6 +67,14 @@ class TumorParameters:
     oxygen_diffusion: float = 1.0       # O₂ diffusion coefficient
     hypoxia_threshold: float = 0.1      # O₂ level defining hypoxia
 
+    # Accelerated repopulation
+    # After radiation-induced cell death, surviving tumor cells detect
+    # reduced local density and proliferate faster. Typically begins
+    # 21-28 days after the start of radiotherapy.
+    # Ref: Withers HR et al. Acta Oncol 27:131, 1988.
+    repopulation_kick_time: float = 28.0  # Days after first treatment before acceleration
+    repopulation_factor: float = 1.5      # Growth rate multiplier (1.0 = off, 2.0 = double)
+
     # Mesh
     min_spacing: float = 0.05           # Min point spacing (mm)
     max_spacing: float = 0.5            # Max point spacing (mm)
@@ -121,7 +129,7 @@ class TumorModel:
         )
         self.mesh.initialize_points(n_initial_points, distribution="halton")
 
-        self.rbf_solver = RBFSolver(epsilon=1.0, poly_degree=2)
+        self.rbf_solver = RBFSolver(kernel="phs", phs_order=3, poly_degree=2)
         self.pde_assembler = PDEAssembler(self.rbf_solver)
 
         # --- Biology components ---
@@ -138,6 +146,10 @@ class TumorModel:
         self.diffusion_map: Optional[np.ndarray] = None
         self.growth_modifier_map: Optional[np.ndarray] = None
         self.oxygen_perfusion_map: Optional[np.ndarray] = None
+
+        # --- Time tracking ---
+        self.current_time: float = 0.0
+        self._first_treatment_time: Optional[float] = None
 
         # --- Cached operators (rebuilt when mesh changes) ---
         self._laplacian_op = None
@@ -204,6 +216,9 @@ class TumorModel:
         Args:
             dt: Time step size in days
         """
+        # Advance simulation clock
+        self.current_time += dt
+
         # Rebuild operators if mesh changed
         if self._operators_dirty:
             self._rebuild_operators()
@@ -318,16 +333,34 @@ class TumorModel:
         """
         Compute tumor growth term with logistic saturation.
 
-        PDE: growth = ρ * u * (1 - u/K) * tissue_modifier
+        PDE: growth = ρ_eff * u * (1 - u/K) * tissue_modifier
 
         This is LOGISTIC GROWTH:
         - When u << K: growth ≈ ρ*u (exponential)
         - When u → K: growth → 0 (carrying capacity)
 
+        ACCELERATED REPOPULATION: After treatment begins, surviving
+        tumor cells detect reduced local density and upregulate
+        proliferation. This kicks in after repopulation_kick_time days
+        and ramps up over 14 days to avoid a discontinuous jump.
+        Ref: Withers HR et al. Acta Oncol 27:131, 1988.
+
         Oxygen dependence: hypoxic regions grow 10x slower
         (cells are quiescent, but those still cycling grow slowly).
         """
-        growth = (self.params.growth_rate *
+        # Compute effective growth rate with accelerated repopulation
+        effective_growth_rate = self.params.growth_rate
+        if self._first_treatment_time is not None:
+            time_since_treatment = (self.current_time -
+                                    self._first_treatment_time)
+            kick = self.params.repopulation_kick_time
+            if time_since_treatment > kick:
+                # Ramp up over 14 days to prevent discontinuous jump
+                ramp = min(1.0, (time_since_treatment - kick) / 14.0)
+                accel = 1.0 + (self.params.repopulation_factor - 1.0) * ramp
+                effective_growth_rate = self.params.growth_rate * accel
+
+        growth = (effective_growth_rate *
                   self.tumor_density *
                   (1.0 - self.tumor_density / self.params.carrying_capacity))
 
@@ -433,6 +466,10 @@ class TumorModel:
         Returns:
             Treatment metrics dictionary
         """
+        # Record first treatment time for accelerated repopulation
+        if self._first_treatment_time is None:
+            self._first_treatment_time = self.current_time
+
         # Get tissue-specific modifiers
         if self.tissue_model.tissue_map is not None:
             rad_mod, drug_mod = self.tissue_model.get_treatment_modifier_maps()

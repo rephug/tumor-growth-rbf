@@ -131,11 +131,16 @@ def create_patient_model(growth_rate):
     )
 
     # GBM-specific treatment parameters
+    # α=0.035 Gy⁻¹ within published GBM range (0.01-0.10)
+    # α/β ≈ 11.7 Gy within published range (5-15 Gy)
+    # 10% resistant fraction represents glioma stem cells / enhanced DNA repair
     treatment_params = TreatmentParameters(
-        fractionation_alpha=0.15,   # α for GBM (α/β ≈ 10 Gy)
-        fractionation_beta=0.015,   # β
-        oxygen_enhancement=2.5,     # OER for GBM
+        fractionation_alpha=0.035,  # α for GBM
+        fractionation_beta=0.003,   # β (α/β ≈ 11.7 Gy)
+        oer_max=3.0,                # Maximum OER (Alper-Howard-Flanders)
+        oer_half_effect=3.0,        # Half-effect O₂ (mmHg)
         chemo_sensitivity=0.15,     # TMZ sensitivity
+        resistant_fraction=0.10,    # 10% treatment-resistant subpopulation
     )
 
     model = TumorModel(
